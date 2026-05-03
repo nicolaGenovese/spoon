@@ -12,6 +12,7 @@ const CLOUD_VOTES_TABLE = CLOUD_CONFIG.votesTable || "pub_claim_votes";
 const CLAIMS_STORAGE_KEY = "wetherspoonPubRace.claims.api.v1";
 const CLAIM_VOTES_STORAGE_KEY = "wetherspoonPubRace.claimVotes.api.v1";
 const ACTIVE_PLAYER_STORAGE_KEY = "wetherspoonPubRace.activePlayer.v1";
+const ACTIVE_FILTER_STORAGE_KEY = "wetherspoonPubRace.activeFilter.v1";
 
 const PLAYERS = [
   { id: "daniel", name: "Daniel", color: "#991b1b", dark: "#7f1d1d" },
@@ -19,6 +20,14 @@ const PLAYERS = [
   { id: "nicola", name: "Nicola", color: "#15803d", dark: "#166534" }
 ];
 const PLAYER_BY_ID = new Map(PLAYERS.map(player => [player.id, player]));
+const FILTERS = [
+  { id: "all", label: "Tutti" },
+  { id: "free", label: "Liberi" },
+  { id: "pending", label: "Attesa" },
+  { id: "validated", label: "Validati" },
+  { id: "mine", label: "Miei" }
+];
+const FILTER_BY_ID = new Map(FILTERS.map(filter => [filter.id, filter]));
 
 const mapElement = document.getElementById("map");
 const map = L.map(mapElement, {
@@ -52,7 +61,9 @@ let filteredPubs = [];
 let claims = loadClaims();
 let claimVotes = loadClaimVotes();
 let activePlayerId = loadActivePlayerId();
+let activeFilter = loadActiveFilter();
 let cloudClient = null;
+let selectedPubId = "";
 const markerById = new Map();
 
 const els = {
@@ -64,7 +75,8 @@ const els = {
   pendingCount: document.getElementById("pendingCount"),
   unclaimedCount: document.getElementById("unclaimedCount"),
   playerPicker: document.getElementById("playerPicker"),
-  scoreboard: document.getElementById("scoreboard"),
+  filterTabs: document.getElementById("filterTabs"),
+  resultSummary: document.getElementById("resultSummary"),
   fitBtn: document.getElementById("fitBtn"),
   clearBtn: document.getElementById("clearBtn"),
   statusDot: document.getElementById("statusDot"),
@@ -243,6 +255,15 @@ function saveActivePlayerId() {
   localStorage.setItem(ACTIVE_PLAYER_STORAGE_KEY, activePlayerId);
 }
 
+function loadActiveFilter() {
+  const stored = localStorage.getItem(ACTIVE_FILTER_STORAGE_KEY);
+  return FILTER_BY_ID.has(stored) ? stored : FILTERS[0].id;
+}
+
+function saveActiveFilter() {
+  localStorage.setItem(ACTIVE_FILTER_STORAGE_KEY, activeFilter);
+}
+
 function getPlayer(playerId) {
   return PLAYER_BY_ID.get(playerId) || null;
 }
@@ -337,30 +358,89 @@ function renderPlayerPicker() {
         ' type="button"',
         ' data-player-id="' + escapeAttr(player.id) + '"',
         ' style="' + playerStyleVars(player) + '">',
-        escapeHTML(player.name),
+        '<strong>' + escapeHTML(player.name) + '</strong>',
+        '<span>' + getScore(player.id) + ' validati</span>',
         '</button>'
       ].join("");
     })
     .join("");
 }
 
-function renderScoreboard() {
-  els.scoreboard.innerHTML = PLAYERS
-    .map(player => [
-      '<div class="score" style="' + playerStyleVars(player) + '">',
-      '<strong>' + getScore(player.id) + '</strong>',
-      '<span>' + escapeHTML(player.name) + '</span>',
-      '</div>'
-    ].join(""))
+function renderFilterTabs() {
+  els.filterTabs.innerHTML = FILTERS
+    .map(filter => {
+      const isActive = filter.id === activeFilter;
+      return [
+        '<button class="filter-tab' + (isActive ? " is-active" : "") + '"',
+        ' type="button"',
+        ' data-filter-id="' + escapeAttr(filter.id) + '"',
+        ' aria-pressed="' + (isActive ? "true" : "false") + '">',
+        '<span>' + escapeHTML(filter.label) + '</span>',
+        '<span class="filter-count">' + getFilterCount(filter.id) + '</span>',
+        '</button>'
+      ].join("");
+    })
     .join("");
 }
 
 function updateCounters() {
   const occupiedCount = Object.keys(claims).length;
+  els.totalCount.textContent = String(pubs.length);
   els.claimedCount.textContent = String(getValidatedClaimedCount());
   els.pendingCount.textContent = String(getPendingClaimedCount());
   els.unclaimedCount.textContent = String(Math.max(pubs.length - occupiedCount, 0));
-  renderScoreboard();
+  renderPlayerPicker();
+  renderFilterTabs();
+  updateResultSummary();
+}
+
+function getFilterCount(filterId) {
+  return pubs.filter(pub => pubMatchesFilter(pub, filterId)).length;
+}
+
+function pubMatchesFilter(pub, filterId) {
+  const claimedBy = getClaimPlayer(pub.id);
+
+  if (filterId === "free") return !claimedBy;
+  if (filterId === "pending") return Boolean(claimedBy) && !isClaimValidated(pub.id);
+  if (filterId === "validated") return Boolean(claimedBy) && isClaimValidated(pub.id);
+  if (filterId === "mine") return Boolean(claimedBy) && claimedBy.id === activePlayerId;
+  return true;
+}
+
+function getSearchQuery() {
+  return els.searchInput.value.trim().toLowerCase();
+}
+
+function pubMatchesSearch(pub, query) {
+  if (!query) return true;
+
+  const haystack = [
+    pub.name,
+    pub.slug,
+    pub.street,
+    pub.locality,
+    pub.region,
+    pub.postcode,
+    pub.telephone,
+    pub.fullAddress
+  ].join(" ").toLowerCase();
+
+  return haystack.includes(query);
+}
+
+function updateResultSummary() {
+  const noun = filteredPubs.length === 1 ? "risultato" : "risultati";
+  els.resultSummary.textContent = filteredPubs.length + " " + noun;
+  els.clearBtn.disabled = !getSearchQuery() && activeFilter === "all";
+  els.fitBtn.disabled = !filteredPubs.length;
+}
+
+function setActiveFilter(filterId, options = {}) {
+  if (!FILTER_BY_ID.has(filterId)) return;
+  activeFilter = filterId;
+  saveActiveFilter();
+  filterPubs(options);
 }
 
 function setActivePlayer(playerId) {
@@ -369,6 +449,7 @@ function setActivePlayer(playerId) {
   saveActivePlayerId();
   renderPlayerPicker();
   map.closePopup();
+  filterPubs({ fit: false });
   setStatus("Giocatore attivo: " + getActivePlayer().name + ".", "good");
 }
 
@@ -402,7 +483,7 @@ async function claimPub(pubId, playerId) {
 
   if (!(await insertCloudClaim(key, player.id))) {
     await loadCloudClaims();
-    render();
+    filterPubs({ fit: false });
     const remotePlayer = getClaimPlayer(key);
     const message = remotePlayer
       ? pub.name + " è già stato visitato da " + remotePlayer.name + "."
@@ -416,7 +497,7 @@ async function claimPub(pubId, playerId) {
   delete claimVotes[key];
   saveClaims();
   saveClaimVotes();
-  render();
+  filterPubs({ fit: false });
   setStatus(pub.name + " segnato per " + player.name + ". In attesa di validazione.", "good");
   focusPub(key);
 }
@@ -435,7 +516,7 @@ async function unclaimPub(pubId) {
 
   if (!(await deleteCloudClaim(key, existingPlayer.id))) {
     await loadCloudClaims();
-    render();
+    filterPubs({ fit: false });
     setStatus("Non riesco a rimuovere la spunta dal database condiviso.", "bad");
     focusPub(key);
     return;
@@ -445,7 +526,7 @@ async function unclaimPub(pubId) {
   delete claimVotes[key];
   saveClaims();
   saveClaimVotes();
-  render();
+  filterPubs({ fit: false });
   setStatus("Spunta rimossa da " + pub.name + ".", "good");
   focusPub(key);
 }
@@ -466,7 +547,7 @@ async function voteOnClaim(pubId, voterId, vote) {
   if (!(await upsertCloudVote(key, voter.id, vote))) {
     await loadCloudClaims();
     cleanClaims();
-    render();
+    filterPubs({ fit: false });
     setStatus("Non riesco a salvare la validazione nel database condiviso.", "bad");
     focusPub(key);
     return;
@@ -480,7 +561,7 @@ async function voteOnClaim(pubId, voterId, vote) {
     if (!(await deleteCloudClaim(key, claimedBy.id))) {
       await loadCloudClaims();
       cleanClaims();
-      render();
+      filterPubs({ fit: false });
       setStatus("Visita rifiutata, ma non riesco ad annullarla nel database condiviso.", "bad");
       focusPub(key);
       return;
@@ -490,13 +571,13 @@ async function voteOnClaim(pubId, voterId, vote) {
     delete claimVotes[key];
     saveClaims();
     saveClaimVotes();
-    render();
+    filterPubs({ fit: false });
     setStatus("Visita annullata: " + pub.name + " è stata rifiutata dagli altri giocatori.", "bad");
     focusPub(key);
     return;
   }
 
-  render();
+  filterPubs({ fit: false });
   setStatus(
     vote === "approve"
       ? "Visita validata da " + voter.name + "."
@@ -668,8 +749,6 @@ async function loadPubsFromAPI() {
     pubs = dedupePubs(normalizedPubs);
     const cloudLoaded = await loadCloudClaims();
     cleanClaims();
-    filteredPubs = pubs.slice();
-    els.totalCount.textContent = String(pubs.length);
 
     const duplicateCount = normalizedPubs.length - pubs.length;
     const details = [];
@@ -681,7 +760,7 @@ async function loadPubsFromAPI() {
       "Dati aggiornati dall'API. " + pubs.length + " pub in gioco" + detailText,
       cloudLoaded || !isCloudConfigured() ? "good" : "bad"
     );
-    render();
+    filterPubs({ fit: false });
     scheduleMapRefresh();
     fitToVisible(false);
   } catch (error) {
@@ -693,14 +772,14 @@ async function loadPubsFromAPI() {
 
 function popupHTML(pub) {
   const address = pub.fullAddress || [pub.street, pub.locality, pub.region, pub.postcode].filter(Boolean).join(", ");
-  const phone = pub.telephone ? "<div>" + escapeHTML(pub.telephone) + "</div>" : "";
+  const phone = pub.telephone ? '<div class="popup-phone">' + escapeHTML(pub.telephone) + '</div>' : "";
   const link = pub.url
     ? '<a class="popup-link" href="' + escapeAttr(pub.url) + '" target="_blank" rel="noopener">Apri pagina pub</a>'
     : "";
 
   return [
     '<div class="popup-title">' + escapeHTML(pub.name) + '</div>',
-    '<div>' + escapeHTML(address) + '</div>',
+    '<div class="popup-address">' + escapeHTML(address) + '</div>',
     phone,
     link,
     claimControlsHTML(pub)
@@ -713,6 +792,11 @@ function renderMarkers() {
 
   filteredPubs.forEach(pub => {
     const marker = L.circleMarker([pub.lat, pub.lng], markerStyleFor(pub)).bindPopup(() => popupHTML(pub));
+    marker.on("popupopen", () => {
+      selectedPubId = pub.id;
+      renderResults();
+      scrollSelectedResult();
+    });
     marker.addTo(markersLayer);
     markerById.set(pub.id, marker);
   });
@@ -720,6 +804,7 @@ function renderMarkers() {
 
 function renderResults() {
   els.visibleCount.textContent = String(filteredPubs.length);
+  updateResultSummary();
 
   if (!pubs.length) {
     els.results.innerHTML = '<div class="empty">Nessun pub caricato.</div>';
@@ -736,14 +821,26 @@ function renderResults() {
     .map(pub => {
       const address = pub.fullAddress || [pub.street, pub.locality, pub.region, pub.postcode].filter(Boolean).join(", ");
       const claimedBy = getClaimPlayer(pub.id);
-      const articleClass = "card" + (claimedBy ? " claimed" : "");
+      const articleClass = [
+        "card",
+        claimedBy ? "claimed" : "",
+        pub.id === selectedPubId ? "is-selected" : ""
+      ].filter(Boolean).join(" ");
       const articleStyle = claimedBy ? ' style="' + claimStyleVars(claimedBy) + '"' : "";
       const state = resultStateHTML(pub, claimedBy);
+      const locality = [pub.locality, pub.region].filter(Boolean).join(", ");
+      const localityLine = [locality, pub.postcode].filter(Boolean).join(" - ");
+      const owner = claimedBy ? resultOwnerHTML(pub, claimedBy) : "";
       return [
-        '<article class="' + articleClass + '" data-id="' + escapeAttr(pub.id) + '"' + articleStyle + '>',
+        '<article class="' + articleClass + '" data-id="' + escapeAttr(pub.id) + '"' + articleStyle,
+        ' role="button" tabindex="0" aria-label="Apri ' + escapeAttr(pub.name) + ' sulla mappa">',
+        '<div class="card-top">',
         '<div class="card-title">' + escapeHTML(pub.name) + '</div>',
-        '<div class="card-meta">' + escapeHTML(address) + '</div>',
         state,
+        '</div>',
+        localityLine ? '<div class="card-locality">' + escapeHTML(localityLine) + '</div>' : "",
+        '<div class="card-meta">' + escapeHTML(address) + '</div>',
+        owner,
         '</article>'
       ].join("");
     })
@@ -755,18 +852,27 @@ function renderResults() {
 }
 
 function resultStateHTML(pub, claimedBy) {
-  if (!claimedBy) return '<div class="card-state">Pub libero</div>';
+  if (!claimedBy) return '<div class="card-state">Libero</div>';
 
   const summary = getVoteSummary(pub.id);
   if (summary.approvals.length) {
-    return '<div class="card-state claimed" style="' + claimStyleVars(claimedBy) + '">Validato per ' + escapeHTML(claimedBy.name) + '</div>';
+    return '<div class="card-state claimed" style="' + claimStyleVars(claimedBy) + '">Validato</div>';
   }
 
   if (summary.rejections.length) {
-    return '<div class="card-state rejected">Contestato: ' + summary.rejections.length + '/' + summary.requiredRejections + '</div>';
+    return '<div class="card-state rejected">Contestato</div>';
   }
 
-  return '<div class="card-state pending">In attesa: ' + escapeHTML(claimedBy.name) + '</div>';
+  return '<div class="card-state pending">In attesa</div>';
+}
+
+function resultOwnerHTML(pub, claimedBy) {
+  const summary = getVoteSummary(pub.id);
+  const prefix = summary.approvals.length ? "Validato per " : "Segnato da ";
+  const text = summary.rejections.length && !summary.approvals.length
+    ? "Contestato per " + claimedBy.name + " (" + summary.rejections.length + "/" + summary.requiredRejections + ")"
+    : prefix + claimedBy.name;
+  return '<div class="card-owner" style="' + claimStyleVars(claimedBy) + '">' + escapeHTML(text) + '</div>';
 }
 
 function render() {
@@ -775,30 +881,12 @@ function render() {
   updateCounters();
 }
 
-function filterPubs() {
-  const query = els.searchInput.value.trim().toLowerCase();
-
-  if (!query) {
-    filteredPubs = pubs.slice();
-  } else {
-    filteredPubs = pubs.filter(pub => {
-      const haystack = [
-        pub.name,
-        pub.slug,
-        pub.street,
-        pub.locality,
-        pub.region,
-        pub.postcode,
-        pub.telephone,
-        pub.fullAddress
-      ].join(" ").toLowerCase();
-
-      return haystack.includes(query);
-    });
-  }
+function filterPubs(options = {}) {
+  const query = getSearchQuery();
+  filteredPubs = pubs.filter(pub => pubMatchesFilter(pub, activeFilter) && pubMatchesSearch(pub, query));
 
   render();
-  fitToVisible(false);
+  if (options.fit !== false) fitToVisible(false);
 }
 
 function fitToVisible(animate = true) {
@@ -811,9 +899,18 @@ function focusPub(id) {
   const key = String(id);
   const pub = pubs.find(item => item.id === key);
   const marker = markerById.get(key);
+  selectedPubId = key;
+  renderResults();
+  scrollSelectedResult();
   if (!pub || !marker) return;
   map.setView([pub.lat, pub.lng], 15, { animate: true });
   marker.openPopup();
+}
+
+function scrollSelectedResult() {
+  const selectedCard = els.results.querySelector(".card.is-selected");
+  if (!selectedCard) return;
+  selectedCard.scrollIntoView({ block: "nearest" });
 }
 
 function htmlToText(value) {
@@ -841,12 +938,17 @@ els.playerPicker.addEventListener("click", event => {
   setActivePlayer(button.dataset.playerId);
 });
 
+els.filterTabs.addEventListener("click", event => {
+  const button = event.target.closest("[data-filter-id]");
+  if (!button) return;
+  setActiveFilter(button.dataset.filterId);
+});
+
 els.searchInput.addEventListener("input", filterPubs);
 els.fitBtn.addEventListener("click", () => fitToVisible());
 els.clearBtn.addEventListener("click", () => {
   els.searchInput.value = "";
-  filterPubs();
-  fitToVisible();
+  setActiveFilter("all");
 });
 
 document.addEventListener("click", event => {
@@ -867,6 +969,13 @@ document.addEventListener("click", event => {
 els.results.addEventListener("click", event => {
   const card = event.target.closest(".card");
   if (!card) return;
+  focusPub(card.dataset.id);
+});
+
+els.results.addEventListener("keydown", event => {
+  const card = event.target.closest(".card");
+  if (!card || !["Enter", " "].includes(event.key)) return;
+  event.preventDefault();
   focusPub(card.dataset.id);
 });
 

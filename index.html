@@ -36,8 +36,8 @@
         </div>
       </div>
 
-      <div class="panel">
-        <div id="status" class="status">
+      <div class="panel status-panel">
+        <div id="status" class="status" role="status" aria-live="polite">
           <span id="statusDot" class="dot"></span>
           <span id="statusText">Caricamento dati pub dall'API Wetherspoon...</span>
         </div>
@@ -48,12 +48,20 @@
         <div id="playerPicker" class="player-picker"></div>
       </div>
 
-      <div class="panel">
-        <label for="searchInput">Ricerca pub</label>
+      <div class="panel filters-panel">
+        <label>Vista</label>
+        <div id="filterTabs" class="filter-tabs" role="group" aria-label="Filtro pub"></div>
+      </div>
+
+      <div class="panel search-panel">
+        <div class="panel-heading">
+          <label for="searchInput">Ricerca pub</label>
+          <span id="resultSummary" class="result-summary">0 risultati</span>
+        </div>
         <input id="searchInput" type="search" placeholder="Cerca nome, città, postcode, regione..." />
         <div class="row search-actions">
-          <button id="fitBtn">Mostra tutti</button>
-          <button id="clearBtn" class="secondary">Pulisci ricerca</button>
+          <button id="fitBtn">Centra mappa</button>
+          <button id="clearBtn" class="secondary">Reset</button>
         </div>
       </div>
 
@@ -80,10 +88,8 @@
         </div>
       </div>
 
-      <div id="scoreboard" class="scoreboard"></div>
-
       <!-- Lista popolata dinamicamente dopo il caricamento dell'API. -->
-      <div id="results" class="results">
+      <div id="results" class="results" aria-label="Risultati pub">
         <div class="empty">Caricamento dati in corso...</div>
       </div>
     </aside>

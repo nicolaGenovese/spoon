@@ -757,7 +757,7 @@ async function loadPubsFromAPI() {
     if (isCloudConfigured() && !cloudLoaded) details.push("database condiviso non raggiungibile");
     const detailText = details.length ? " (" + details.join(", ") + ")." : ".";
     setStatus(
-      "Dati aggiornati dall'API. " + pubs.length + " pub in gioco" + detailText,
+      "Dati aggiornati. " + pubs.length + " pub in gioco" + detailText,
       cloudLoaded || !isCloudConfigured() ? "good" : "bad"
     );
     filterPubs({ fit: false });

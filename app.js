@@ -6,9 +6,11 @@ const PUBS_API_FIELDS = "id,slug,link,title,acf";
 const PUBS_API_PAGE_SIZE = 100;
 const CLOUD_CONFIG = window.SPOON_CLOUD_CONFIG || {};
 const CLOUD_TABLE = CLOUD_CONFIG.table || "pub_claims";
+const CLOUD_VOTES_TABLE = CLOUD_CONFIG.votesTable || "pub_claim_votes";
 
 // Chiavi localStorage: lo stato del gioco resta salvato solo in questo browser.
 const CLAIMS_STORAGE_KEY = "wetherspoonPubRace.claims.api.v1";
+const CLAIM_VOTES_STORAGE_KEY = "wetherspoonPubRace.claimVotes.api.v1";
 const ACTIVE_PLAYER_STORAGE_KEY = "wetherspoonPubRace.activePlayer.v1";
 
 const PLAYERS = [
@@ -48,6 +50,7 @@ const freeMarkerStyle = {
 let pubs = [];
 let filteredPubs = [];
 let claims = loadClaims();
+let claimVotes = loadClaimVotes();
 let activePlayerId = loadActivePlayerId();
 let cloudClient = null;
 const markerById = new Map();
@@ -58,6 +61,7 @@ const els = {
   totalCount: document.getElementById("totalCount"),
   visibleCount: document.getElementById("visibleCount"),
   claimedCount: document.getElementById("claimedCount"),
+  pendingCount: document.getElementById("pendingCount"),
   unclaimedCount: document.getElementById("unclaimedCount"),
   playerPicker: document.getElementById("playerPicker"),
   scoreboard: document.getElementById("scoreboard"),
@@ -121,6 +125,20 @@ function saveClaims() {
   localStorage.setItem(CLAIMS_STORAGE_KEY, JSON.stringify(claims));
 }
 
+function loadClaimVotes() {
+  try {
+    const stored = JSON.parse(localStorage.getItem(CLAIM_VOTES_STORAGE_KEY) || "{}");
+    return stored && typeof stored === "object" && !Array.isArray(stored) ? stored : {};
+  } catch (error) {
+    console.warn("Validazioni non caricate", error);
+    return {};
+  }
+}
+
+function saveClaimVotes() {
+  localStorage.setItem(CLAIM_VOTES_STORAGE_KEY, JSON.stringify(claimVotes));
+}
+
 function rowsToClaims(rows) {
   return Object.fromEntries(
     rows
@@ -129,21 +147,37 @@ function rowsToClaims(rows) {
   );
 }
 
+function rowsToClaimVotes(rows) {
+  return (rows || []).reduce((votesByPub, row) => {
+    if (!row.pub_id || !PLAYER_BY_ID.has(row.voter_id) || !["approve", "reject"].includes(row.vote)) {
+      return votesByPub;
+    }
+
+    const pubId = String(row.pub_id);
+    votesByPub[pubId] = votesByPub[pubId] || {};
+    votesByPub[pubId][row.voter_id] = row.vote;
+    return votesByPub;
+  }, {});
+}
+
 async function loadCloudClaims() {
   const client = getCloudClient();
   if (!client) return false;
 
-  const { data, error } = await client
-    .from(CLOUD_TABLE)
-    .select("pub_id,player_id");
+  const [claimsResult, votesResult] = await Promise.all([
+    client.from(CLOUD_TABLE).select("pub_id,player_id"),
+    client.from(CLOUD_VOTES_TABLE).select("pub_id,voter_id,vote")
+  ]);
 
-  if (error) {
-    console.warn("Spunte cloud non caricate", error);
+  if (claimsResult.error || votesResult.error) {
+    console.warn("Spunte cloud non caricate", claimsResult.error || votesResult.error);
     return false;
   }
 
-  claims = rowsToClaims(data || []);
+  claims = rowsToClaims(claimsResult.data || []);
+  claimVotes = rowsToClaimVotes(votesResult.data || []);
   saveClaims();
+  saveClaimVotes();
   return true;
 }
 
@@ -181,6 +215,25 @@ async function deleteCloudClaim(pubId, playerId) {
   return true;
 }
 
+async function upsertCloudVote(pubId, voterId, vote) {
+  const client = getCloudClient();
+  if (!client) return true;
+
+  const { error } = await client
+    .from(CLOUD_VOTES_TABLE)
+    .upsert(
+      { pub_id: String(pubId), voter_id: voterId, vote },
+      { onConflict: "pub_id,voter_id" }
+    );
+
+  if (error) {
+    console.warn("Validazione cloud non salvata", error);
+    return false;
+  }
+
+  return true;
+}
+
 function loadActivePlayerId() {
   const stored = localStorage.getItem(ACTIVE_PLAYER_STORAGE_KEY);
   return PLAYER_BY_ID.has(stored) ? stored : PLAYERS[0].id;
@@ -206,13 +259,59 @@ function getClaimPlayer(pubId) {
   return getPlayer(getClaim(pubId));
 }
 
-// Elimina spunte salvate se l'API non restituisce più quel pub o giocatore.
+function getClaimVotes(pubId) {
+  return claimVotes[String(pubId)] || {};
+}
+
+function getVoteSummary(pubId) {
+  const claimedBy = getClaimPlayer(pubId);
+  const votes = getClaimVotes(pubId);
+  const eligibleVoters = PLAYERS.filter(player => !claimedBy || player.id !== claimedBy.id);
+  const approvals = eligibleVoters.filter(player => votes[player.id] === "approve");
+  const rejections = eligibleVoters.filter(player => votes[player.id] === "reject");
+
+  return {
+    approvals,
+    rejections,
+    requiredRejections: eligibleVoters.length
+  };
+}
+
+function isClaimValidated(pubId) {
+  return getVoteSummary(pubId).approvals.length > 0;
+}
+
+function shouldCancelClaim(pubId) {
+  const summary = getVoteSummary(pubId);
+  return summary.requiredRejections > 0 && summary.rejections.length >= summary.requiredRejections;
+}
+
+function getValidatedClaimedCount() {
+  return Object.keys(claims).filter(isClaimValidated).length;
+}
+
+function getPendingClaimedCount() {
+  return Object.keys(claims).filter(pubId => !isClaimValidated(pubId)).length;
+}
+
+// Elimina spunte e voti salvati se l'API non restituisce più quel pub o giocatore.
 function cleanClaims() {
   const validPubIds = new Set(pubs.map(pub => String(pub.id)));
   claims = Object.fromEntries(
     Object.entries(claims).filter(([pubId, playerId]) => validPubIds.has(pubId) && PLAYER_BY_ID.has(playerId))
   );
+  claimVotes = Object.fromEntries(
+    Object.entries(claimVotes)
+      .filter(([pubId]) => validPubIds.has(pubId) && claims[pubId])
+      .map(([pubId, votes]) => [
+        pubId,
+        Object.fromEntries(
+          Object.entries(votes).filter(([playerId, vote]) => PLAYER_BY_ID.has(playerId) && ["approve", "reject"].includes(vote))
+        )
+      ])
+  );
   saveClaims();
+  saveClaimVotes();
 }
 
 function playerStyleVars(player) {
@@ -223,12 +322,10 @@ function claimStyleVars(player) {
   return "--claim-color: " + escapeAttr(player.color) + ";";
 }
 
-function getClaimedCount() {
-  return Object.keys(claims).length;
-}
-
 function getScore(playerId) {
-  return Object.values(claims).filter(claimedBy => claimedBy === playerId).length;
+  return Object.entries(claims)
+    .filter(([pubId, claimedBy]) => claimedBy === playerId && isClaimValidated(pubId))
+    .length;
 }
 
 function renderPlayerPicker() {
@@ -259,9 +356,10 @@ function renderScoreboard() {
 }
 
 function updateCounters() {
-  const claimedCount = getClaimedCount();
-  els.claimedCount.textContent = String(claimedCount);
-  els.unclaimedCount.textContent = String(Math.max(pubs.length - claimedCount, 0));
+  const occupiedCount = Object.keys(claims).length;
+  els.claimedCount.textContent = String(getValidatedClaimedCount());
+  els.pendingCount.textContent = String(getPendingClaimedCount());
+  els.unclaimedCount.textContent = String(Math.max(pubs.length - occupiedCount, 0));
   renderScoreboard();
 }
 
@@ -315,9 +413,11 @@ async function claimPub(pubId, playerId) {
   }
 
   claims[key] = player.id;
+  delete claimVotes[key];
   saveClaims();
+  saveClaimVotes();
   render();
-  setStatus(pub.name + " segnato per " + player.name + ".", "good");
+  setStatus(pub.name + " segnato per " + player.name + ". In attesa di validazione.", "good");
   focusPub(key);
 }
 
@@ -342,10 +442,110 @@ async function unclaimPub(pubId) {
   }
 
   delete claims[key];
+  delete claimVotes[key];
   saveClaims();
+  saveClaimVotes();
   render();
   setStatus("Spunta rimossa da " + pub.name + ".", "good");
   focusPub(key);
+}
+
+async function voteOnClaim(pubId, voterId, vote) {
+  const key = String(pubId);
+  const pub = pubs.find(item => item.id === key);
+  const claimedBy = getClaimPlayer(key);
+  const voter = getPlayer(voterId);
+  if (!pub || !claimedBy || !voter || !["approve", "reject"].includes(vote)) return;
+
+  if (claimedBy.id === voter.id) {
+    setStatus("Non puoi validare una visita segnata da te.", "bad");
+    focusPub(key);
+    return;
+  }
+
+  if (!(await upsertCloudVote(key, voter.id, vote))) {
+    await loadCloudClaims();
+    cleanClaims();
+    render();
+    setStatus("Non riesco a salvare la validazione nel database condiviso.", "bad");
+    focusPub(key);
+    return;
+  }
+
+  claimVotes[key] = claimVotes[key] || {};
+  claimVotes[key][voter.id] = vote;
+  saveClaimVotes();
+
+  if (shouldCancelClaim(key)) {
+    if (!(await deleteCloudClaim(key, claimedBy.id))) {
+      await loadCloudClaims();
+      cleanClaims();
+      render();
+      setStatus("Visita rifiutata, ma non riesco ad annullarla nel database condiviso.", "bad");
+      focusPub(key);
+      return;
+    }
+
+    delete claims[key];
+    delete claimVotes[key];
+    saveClaims();
+    saveClaimVotes();
+    render();
+    setStatus("Visita annullata: " + pub.name + " è stata rifiutata dagli altri giocatori.", "bad");
+    focusPub(key);
+    return;
+  }
+
+  render();
+  setStatus(
+    vote === "approve"
+      ? "Visita validata da " + voter.name + "."
+      : "Visita rifiutata da " + voter.name + ".",
+    vote === "approve" ? "good" : "bad"
+  );
+  focusPub(key);
+}
+
+function validationStateHTML(pub) {
+  const summary = getVoteSummary(pub.id);
+  const approvals = summary.approvals.map(player => player.name).join(", ");
+  const rejections = summary.rejections.map(player => player.name).join(", ");
+
+  if (summary.approvals.length) {
+    return '<div class="popup-state claimed" style="' + claimStyleVars(summary.approvals[0]) + '">Validato da ' + escapeHTML(approvals) + '</div>';
+  }
+
+  if (summary.rejections.length) {
+    return '<div class="popup-state rejected">Rifiutato da ' + escapeHTML(rejections) + '</div>';
+  }
+
+  return '<div class="popup-state pending">In attesa di validazione</div>';
+}
+
+function voteControlsHTML(pub, activePlayer, claimedBy) {
+  if (activePlayer.id === claimedBy.id) {
+    return [
+      '<button class="popup-action secondary" type="button" data-game-action="unclaim"',
+      ' data-pub-id="' + escapeAttr(pub.id) + '">Togli spunta</button>'
+    ].join("");
+  }
+
+  const currentVote = getClaimVotes(pub.id)[activePlayer.id] || "";
+  return [
+    '<div class="popup-vote-actions">',
+    '<button class="popup-action" type="button" data-game-action="approve"',
+    ' data-pub-id="' + escapeAttr(pub.id) + '"',
+    ' data-player-id="' + escapeAttr(activePlayer.id) + '"',
+    ' style="' + playerStyleVars(activePlayer) + '">',
+    currentVote === "approve" ? "Validato da te" : "Valida visita",
+    '</button>',
+    '<button class="popup-action secondary" type="button" data-game-action="reject"',
+    ' data-pub-id="' + escapeAttr(pub.id) + '"',
+    ' data-player-id="' + escapeAttr(activePlayer.id) + '">',
+    currentVote === "reject" ? "Rifiutato da te" : "Rifiuta",
+    '</button>',
+    '</div>'
+  ].join("");
 }
 
 function claimControlsHTML(pub) {
@@ -366,18 +566,13 @@ function claimControlsHTML(pub) {
     ].join("");
   }
 
-  const samePlayer = claimedBy.id === activePlayer.id;
   return [
     '<div class="popup-game">',
     '<div class="popup-state claimed" style="' + claimStyleVars(claimedBy) + '">',
     'Visitato da ' + escapeHTML(claimedBy.name),
     '</div>',
-    samePlayer
-      ? [
-          '<button class="popup-action secondary" type="button" data-game-action="unclaim"',
-          ' data-pub-id="' + escapeAttr(pub.id) + '">Togli spunta</button>'
-        ].join("")
-      : '<button class="popup-action" type="button" disabled>Bloccato da ' + escapeHTML(claimedBy.name) + '</button>',
+    validationStateHTML(pub),
+    voteControlsHTML(pub, activePlayer, claimedBy),
     '</div>'
   ].join("");
 }
@@ -470,19 +665,22 @@ async function loadPubsFromAPI() {
       .map(normalizeAPIPub)
       .filter(pub => Number.isFinite(pub.lat) && Number.isFinite(pub.lng));
 
-        pubs = dedupePubs(normalizedPubs);
-        const cloudLoaded = await loadCloudClaims();
-        cleanClaims();
-        filteredPubs = pubs.slice();
-        els.totalCount.textContent = String(pubs.length);
+    pubs = dedupePubs(normalizedPubs);
+    const cloudLoaded = await loadCloudClaims();
+    cleanClaims();
+    filteredPubs = pubs.slice();
+    els.totalCount.textContent = String(pubs.length);
 
-        const duplicateCount = normalizedPubs.length - pubs.length;
-        const details = [];
-        if (duplicateCount) details.push(duplicateCount + " duplicati esclusi");
-        if (cloudLoaded) details.push("database condiviso attivo");
-        if (isCloudConfigured() && !cloudLoaded) details.push("database condiviso non raggiungibile");
-        const detailText = details.length ? " (" + details.join(", ") + ")." : ".";
-        setStatus("Dati aggiornati dall'API. " + pubs.length + " pub in gioco" + detailText, cloudLoaded || !isCloudConfigured() ? "good" : "bad");
+    const duplicateCount = normalizedPubs.length - pubs.length;
+    const details = [];
+    if (duplicateCount) details.push(duplicateCount + " duplicati esclusi");
+    if (cloudLoaded) details.push("database condiviso attivo");
+    if (isCloudConfigured() && !cloudLoaded) details.push("database condiviso non raggiungibile");
+    const detailText = details.length ? " (" + details.join(", ") + ")." : ".";
+    setStatus(
+      "Dati aggiornati dall'API. " + pubs.length + " pub in gioco" + detailText,
+      cloudLoaded || !isCloudConfigured() ? "good" : "bad"
+    );
     render();
     scheduleMapRefresh();
     fitToVisible(false);
@@ -540,9 +738,7 @@ function renderResults() {
       const claimedBy = getClaimPlayer(pub.id);
       const articleClass = "card" + (claimedBy ? " claimed" : "");
       const articleStyle = claimedBy ? ' style="' + claimStyleVars(claimedBy) + '"' : "";
-      const state = claimedBy
-        ? '<div class="card-state claimed" style="' + claimStyleVars(claimedBy) + '">Visitato da ' + escapeHTML(claimedBy.name) + '</div>'
-        : '<div class="card-state">Pub libero</div>';
+      const state = resultStateHTML(pub, claimedBy);
       return [
         '<article class="' + articleClass + '" data-id="' + escapeAttr(pub.id) + '"' + articleStyle + '>',
         '<div class="card-title">' + escapeHTML(pub.name) + '</div>',
@@ -556,6 +752,21 @@ function renderResults() {
   if (filteredPubs.length > 500) {
     els.results.insertAdjacentHTML("beforeend", '<div class="empty">Mostrati i primi 500 risultati. Usa la ricerca per restringere.</div>');
   }
+}
+
+function resultStateHTML(pub, claimedBy) {
+  if (!claimedBy) return '<div class="card-state">Pub libero</div>';
+
+  const summary = getVoteSummary(pub.id);
+  if (summary.approvals.length) {
+    return '<div class="card-state claimed" style="' + claimStyleVars(claimedBy) + '">Validato per ' + escapeHTML(claimedBy.name) + '</div>';
+  }
+
+  if (summary.rejections.length) {
+    return '<div class="card-state rejected">Contestato: ' + summary.rejections.length + '/' + summary.requiredRejections + '</div>';
+  }
+
+  return '<div class="card-state pending">In attesa: ' + escapeHTML(claimedBy.name) + '</div>';
 }
 
 function render() {
@@ -646,6 +857,10 @@ document.addEventListener("click", event => {
     claimPub(pubId, button.dataset.playerId);
   } else if (button.dataset.gameAction === "unclaim") {
     unclaimPub(pubId);
+  } else if (button.dataset.gameAction === "approve") {
+    voteOnClaim(pubId, button.dataset.playerId, "approve");
+  } else if (button.dataset.gameAction === "reject") {
+    voteOnClaim(pubId, button.dataset.playerId, "reject");
   }
 }, true);
 

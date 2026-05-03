@@ -330,6 +330,16 @@ button.secondary:hover {
   color: var(--claim-color);
 }
 
+.card-state.pending {
+  background: #fef3c7;
+  color: #92400e;
+}
+
+.card-state.rejected {
+  background: #fee2e2;
+  color: var(--bad);
+}
+
 .empty {
   color: var(--muted);
   text-align: center;
@@ -376,6 +386,20 @@ button.secondary:hover {
 
 .popup-state.claimed {
   color: var(--claim-color);
+}
+
+.popup-state.pending {
+  color: #92400e;
+}
+
+.popup-state.rejected {
+  color: var(--bad);
+}
+
+.popup-vote-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
 }
 
 .popup-action {

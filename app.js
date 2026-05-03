@@ -728,7 +728,7 @@ function dedupePubs(pubsToDedupe) {
 
 async function loadPubsFromAPI() {
   try {
-    setStatus("Caricamento dati pub dall'API Wetherspoon...", "");
+    setStatus("Caricamento dati pub Wetherspoon...", "");
     const firstPage = await fetchAPIPubsPage(1);
     const totalPages = Math.max(firstPage.totalPages, 1);
     const remainingPages = [];
@@ -765,7 +765,7 @@ async function loadPubsFromAPI() {
     fitToVisible(false);
   } catch (error) {
     console.error(error);
-    setStatus("Non riesco a caricare i pub dall'API Wetherspoon.", "bad");
+    setStatus("Non riesco a caricare i pub Wetherspoon.", "bad");
     els.results.innerHTML = '<div class="empty">Dati non caricati. Controlla la connessione e riprova.</div>';
   }
 }
